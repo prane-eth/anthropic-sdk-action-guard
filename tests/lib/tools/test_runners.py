@@ -6,7 +6,15 @@ from typing_extensions import Literal
 import pytest
 from inline_snapshot import external, snapshot
 
-from anthropic import Anthropic, AsyncAnthropic, beta_tool, beta_async_tool
+from anthropic import (
+    Anthropic,
+    BetaToolCall,
+    AnthropicError,
+    AsyncAnthropic,
+    BetaGuardDecision,
+    beta_tool,
+    beta_async_tool,
+)
 from anthropic._utils import assert_signatures_in_sync
 from anthropic._compat import PYDANTIC_V1
 from anthropic.lib.tools import BetaFunctionToolResultType
@@ -230,6 +238,92 @@ class TestSyncRunTools:
 ]
 """
         )
+
+    @pytest.mark.parametrize(
+        "http_snapshot",
+        [
+            cast(Any, external("uuid:b38bbf6c-9a76-40ca-b09d-7a3911776e0f.json")),
+        ],
+    )
+    def test_action_guard_blocks_tool_call(self, snapshot_client: Anthropic) -> None:
+        called = False
+        seen_calls: list[BetaToolCall] = []
+
+        @beta_tool
+        def get_weather(location: str, units: Literal["c", "f"]) -> BetaFunctionToolResultType:
+            nonlocal called
+            called = True
+            return json.dumps(_get_weather(location, units))
+
+        def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+            seen_calls.append(tool_call)
+            return BetaGuardDecision.BLOCK
+
+        runner = snapshot_client.beta.messages.tool_runner(
+            max_tokens=1024,
+            model="claude-haiku-4-5",
+            tools=[get_weather],
+            messages=[{"role": "user", "content": "What is the weather in SF?"}],
+            action_guard=action_guard,
+        )
+
+        next(runner)
+        tool_call_response = runner.generate_tool_call_response()
+
+        assert called is False
+        assert len(seen_calls) == 1
+        assert seen_calls[0].name == "get_weather"
+        assert seen_calls[0].type == "tool_use"
+        assert seen_calls[0].server_name is None
+        assert seen_calls[0].input == {"location": "San Francisco, CA", "units": "f"}
+        assert print_obj(tool_call_response).replace(seen_calls[0].id, "<tool_use_id>") == snapshot(
+            """\
+{
+    'role': 'user',
+    'content': [
+        {
+            'type': 'tool_result',
+            'tool_use_id': '<tool_use_id>',
+            'content': "Error: Tool 'get_weather' was blocked by the action guard",
+            'is_error': True
+        }
+    ]
+}
+"""
+        )
+
+    @pytest.mark.parametrize(
+        "http_snapshot",
+        [
+            cast(Any, external("uuid:b38bbf6c-9a76-40ca-b09d-7a3911776e0f.json")),
+        ],
+    )
+    def test_action_guard_blocks_create_tool_use(self, snapshot_client: Anthropic) -> None:
+        def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+            assert tool_call.name == "get_weather"
+            return BetaGuardDecision.BLOCK
+
+        with pytest.raises(AnthropicError, match="blocked by the action guard"):
+            snapshot_client.beta.messages.create(
+                max_tokens=1024,
+                model="claude-haiku-4-5",
+                messages=[{"role": "user", "content": "What is the weather in SF?"}],
+                tools=[
+                    {
+                        "name": "get_weather",
+                        "description": "Lookup the weather",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "location": {"type": "string"},
+                                "units": {"type": "string"},
+                            },
+                            "required": ["location", "units"],
+                        },
+                    }
+                ],
+                action_guard=action_guard,
+            )
 
     @pytest.mark.parametrize(
         "http_snapshot",
@@ -621,6 +715,96 @@ async def test_basic_call_async(async_snapshot_client: AsyncAnthropic) -> None:
         tools=[get_weather],
         messages=[{"role": "user", "content": "What is the weather in SF?"}],
     ).until_done()
+
+
+@pytest.mark.skipif(PYDANTIC_V1, reason="tool runner not supported with pydantic v1")
+@pytest.mark.parametrize(
+    "http_snapshot",
+    [
+        cast(Any, external("uuid:64fe7974-681a-4023-9848-b32ba39c8664.json")),
+    ],
+)
+async def test_action_guard_blocks_tool_call_async(async_snapshot_client: AsyncAnthropic) -> None:
+    called = False
+    seen_calls: list[BetaToolCall] = []
+
+    @beta_async_tool
+    async def get_weather(location: str, units: Literal["c", "f"]) -> BetaFunctionToolResultType:
+        nonlocal called
+        called = True
+        return json.dumps(_get_weather(location, units))
+
+    async def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+        seen_calls.append(tool_call)
+        return BetaGuardDecision.BLOCK
+
+    runner = async_snapshot_client.beta.messages.tool_runner(
+        max_tokens=1024,
+        model="claude-haiku-4-5",
+        tools=[get_weather],
+        messages=[{"role": "user", "content": "What is the weather in SF?"}],
+        action_guard=action_guard,
+    )
+
+    await runner.__anext__()
+    tool_call_response = await runner.generate_tool_call_response()
+
+    assert called is False
+    assert len(seen_calls) == 1
+    assert seen_calls[0].name == "get_weather"
+    assert seen_calls[0].type == "tool_use"
+    assert seen_calls[0].server_name is None
+    assert seen_calls[0].input == {"location": "San Francisco, CA", "units": "f"}
+    assert print_obj(tool_call_response).replace(seen_calls[0].id, "<tool_use_id>") == snapshot(
+        """\
+{
+    'role': 'user',
+    'content': [
+        {
+            'type': 'tool_result',
+            'tool_use_id': '<tool_use_id>',
+            'content': "Error: Tool 'get_weather' was blocked by the action guard",
+            'is_error': True
+        }
+    ]
+}
+"""
+    )
+
+
+@pytest.mark.skipif(PYDANTIC_V1, reason="tool runner not supported with pydantic v1")
+@pytest.mark.parametrize(
+    "http_snapshot",
+    [
+        cast(Any, external("uuid:64fe7974-681a-4023-9848-b32ba39c8664.json")),
+    ],
+)
+async def test_action_guard_blocks_create_tool_use_async(async_snapshot_client: AsyncAnthropic) -> None:
+    async def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+        assert tool_call.name == "get_weather"
+        return BetaGuardDecision.BLOCK
+
+    with pytest.raises(AnthropicError, match="blocked by the action guard"):
+        await async_snapshot_client.beta.messages.create(
+            max_tokens=1024,
+            model="claude-haiku-4-5",
+            messages=[{"role": "user", "content": "What is the weather in SF?"}],
+            tools=[
+                {
+                    "name": "get_weather",
+                    "description": "Lookup the weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"},
+                            "units": {"type": "string"},
+                        },
+                        "required": ["location", "units"],
+                    },
+                }
+            ],
+            action_guard=action_guard,
+        )
 
 
 def _get_weather(location: str, units: Literal["c", "f"]) -> Dict[str, Any]:

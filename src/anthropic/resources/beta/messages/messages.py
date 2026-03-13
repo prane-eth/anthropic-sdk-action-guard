@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import TYPE_CHECKING, List, Type, Union, Iterable, Optional, cast
+from typing import TYPE_CHECKING, Any, List, Type, Union, Callable, Iterable, Optional, cast
 from functools import partial
 from itertools import chain
 from typing_extensions import Literal, overload
@@ -29,7 +29,9 @@ from ...._resource import SyncAPIResource, AsyncAPIResource
 from ...._response import to_streamed_response_wrapper, async_to_streamed_response_wrapper
 from ....lib.tools import (
     BetaToolRunner,
+    BetaActionGuard,
     BetaAsyncToolRunner,
+    BetaAsyncActionGuard,
     BetaStreamingToolRunner,
     BetaAsyncStreamingToolRunner,
 )
@@ -49,6 +51,7 @@ from ....types.model_param import ModelParam
 from ....lib._parse._response import ResponseFormatT, parse_beta_response
 from ....lib._parse._transform import transform_schema
 from ....lib._stainless_helpers import stainless_helper_header as _stainless_helper_header
+from ....lib.tools._action_guard import BetaToolCall, BetaGuardDecision, normalize_guard_decision
 from ....types.beta.beta_message import BetaMessage
 from ....lib.tools._beta_functions import (
     BetaFunctionTool,
@@ -112,6 +115,7 @@ class Messages(SyncAPIResource):
         max_tokens: int,
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
+        action_guard: BetaActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -418,6 +422,7 @@ class Messages(SyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         stream: Literal[True],
+        action_guard: BetaActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -723,6 +728,7 @@ class Messages(SyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         stream: bool,
+        action_guard: BetaActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -1027,6 +1033,7 @@ class Messages(SyncAPIResource):
         max_tokens: int,
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
+        action_guard: BetaActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -1084,6 +1091,10 @@ class Messages(SyncAPIResource):
             **_stainless_helper_header(tools, messages),
             **(extra_headers or {}),
         }
+        post_parser: Callable[[Any], Any] | NotGiven = NOT_GIVEN
+        if not stream and is_given(action_guard):
+            post_parser = partial(_validate_sync_action_guard_response, action_guard)
+
         return self._post(
             "/v1/messages?beta=true",
             body=maybe_transform(
@@ -1116,7 +1127,11 @@ class Messages(SyncAPIResource):
                 else message_create_params.MessageCreateParamsNonStreaming,
             ),
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
+                post_parser=post_parser,
             ),
             cast_to=BetaMessage,
             stream=stream or False,
@@ -1268,6 +1283,7 @@ class Messages(SyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaRunnableTool | BetaToolUnionParam],
+        action_guard: BetaActionGuard | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
@@ -1305,6 +1321,7 @@ class Messages(SyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaRunnableTool | BetaToolUnionParam],
+        action_guard: BetaActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         stream: Literal[True],
@@ -1342,6 +1359,7 @@ class Messages(SyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaRunnableTool | BetaToolUnionParam],
+        action_guard: BetaActionGuard | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         stream: bool,
         max_iterations: int | Omit = omit,
@@ -1378,6 +1396,7 @@ class Messages(SyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaRunnableTool | BetaToolUnionParam],
+        action_guard: BetaActionGuard | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         max_iterations: int | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
@@ -1485,6 +1504,7 @@ class Messages(SyncAPIResource):
                     "timeout": timeout,
                 },
                 client=cast("Anthropic", self._client),
+                action_guard=action_guard if is_given(action_guard) else None,
                 max_iterations=max_iterations if is_given(max_iterations) else None,
                 compaction_control=compaction_control if is_given(compaction_control) else None,
             )
@@ -1498,6 +1518,7 @@ class Messages(SyncAPIResource):
                 "timeout": timeout,
             },
             client=cast("Anthropic", self._client),
+            action_guard=action_guard if is_given(action_guard) else None,
             max_iterations=max_iterations if is_given(max_iterations) else None,
             compaction_control=compaction_control if is_given(compaction_control) else None,
         )
@@ -1508,6 +1529,7 @@ class Messages(SyncAPIResource):
         max_tokens: int,
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
+        action_guard: BetaActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -1622,6 +1644,7 @@ class Messages(SyncAPIResource):
         return BetaMessageStreamManager(
             make_request,
             output_format=NOT_GIVEN if is_dict(output_format) else cast(ResponseFormatT, output_format),
+            action_guard=action_guard if is_given(action_guard) else None,
         )
 
     def count_tokens(
@@ -1926,6 +1949,7 @@ class AsyncMessages(AsyncAPIResource):
         max_tokens: int,
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -2232,6 +2256,7 @@ class AsyncMessages(AsyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         stream: Literal[True],
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -2537,6 +2562,7 @@ class AsyncMessages(AsyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         stream: bool,
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -2841,6 +2867,7 @@ class AsyncMessages(AsyncAPIResource):
         max_tokens: int,
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         container: Optional[message_create_params.Container] | Omit = omit,
         context_management: Optional[BetaContextManagementConfigParam] | Omit = omit,
@@ -2898,7 +2925,7 @@ class AsyncMessages(AsyncAPIResource):
             **_stainless_helper_header(tools, messages),
             **(extra_headers or {}),
         }
-        return await self._post(
+        response = await self._post(
             "/v1/messages?beta=true",
             body=await async_maybe_transform(
                 {
@@ -2930,12 +2957,20 @@ class AsyncMessages(AsyncAPIResource):
                 else message_create_params.MessageCreateParamsNonStreaming,
             ),
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
             ),
             cast_to=BetaMessage,
             stream=stream or False,
             stream_cls=AsyncStream[BetaRawMessageStreamEvent],
         )
+
+        if not stream and is_given(action_guard):
+            return await _validate_async_action_guard_response(action_guard, cast(BetaMessage, response))
+
+        return response
 
     async def parse(
         self,
@@ -3081,6 +3116,7 @@ class AsyncMessages(AsyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaAsyncRunnableTool | BetaToolUnionParam],
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         max_iterations: int | Omit = omit,
@@ -3118,6 +3154,7 @@ class AsyncMessages(AsyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaAsyncRunnableTool | BetaToolUnionParam],
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         stream: Literal[True],
         max_iterations: int | Omit = omit,
@@ -3155,6 +3192,7 @@ class AsyncMessages(AsyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaAsyncRunnableTool | BetaToolUnionParam],
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         stream: bool,
         max_iterations: int | Omit = omit,
@@ -3191,6 +3229,7 @@ class AsyncMessages(AsyncAPIResource):
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
         tools: Iterable[BetaAsyncRunnableTool | BetaToolUnionParam],
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         compaction_control: CompactionControl | Omit = omit,
         max_iterations: int | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
@@ -3291,6 +3330,7 @@ class AsyncMessages(AsyncAPIResource):
                     "timeout": timeout,
                 },
                 client=cast("AsyncAnthropic", self._client),
+                action_guard=action_guard if is_given(action_guard) else None,
                 max_iterations=max_iterations if is_given(max_iterations) else None,
                 compaction_control=compaction_control if is_given(compaction_control) else None,
             )
@@ -3304,6 +3344,7 @@ class AsyncMessages(AsyncAPIResource):
                 "timeout": timeout,
             },
             client=cast("AsyncAnthropic", self._client),
+            action_guard=action_guard if is_given(action_guard) else None,
             max_iterations=max_iterations if is_given(max_iterations) else None,
             compaction_control=compaction_control if is_given(compaction_control) else None,
         )
@@ -3314,6 +3355,7 @@ class AsyncMessages(AsyncAPIResource):
         max_tokens: int,
         messages: Iterable[BetaMessageParam],
         model: ModelParam,
+        action_guard: BetaAsyncActionGuard | Omit = omit,
         cache_control: Optional[BetaCacheControlEphemeralParam] | Omit = omit,
         metadata: BetaMetadataParam | Omit = omit,
         output_config: BetaOutputConfigParam | Omit = omit,
@@ -3426,6 +3468,7 @@ class AsyncMessages(AsyncAPIResource):
         return BetaAsyncMessageStreamManager(
             request,
             output_format=NOT_GIVEN if is_dict(output_format) else cast(ResponseFormatT, output_format),
+            action_guard=action_guard if is_given(action_guard) else None,
         )
 
     async def count_tokens(
@@ -3799,6 +3842,38 @@ def _merge_output_configs(
         else:
             return {"format": output_format}
     return output_config
+
+
+def _iter_action_guard_calls(response: BetaMessage) -> Iterable[BetaToolCall]:
+    for content_block in response.content:
+        if content_block.type == "tool_use" or content_block.type == "mcp_tool_use":
+            yield BetaToolCall.from_tool_use_block(content_block)
+
+
+def _validate_sync_action_guard_response(action_guard: BetaActionGuard, response: BetaMessage) -> BetaMessage:
+    for tool_call in _iter_action_guard_calls(response):
+        decision = action_guard(tool_call)
+        if inspect.isawaitable(decision):
+            raise TypeError("`action_guard` must be synchronous when used with the sync create method")
+
+        if normalize_guard_decision(decision) == BetaGuardDecision.BLOCK:
+            raise AnthropicError(f"Tool '{tool_call.name}' was blocked by the action guard")
+
+    return response
+
+
+async def _validate_async_action_guard_response(
+    action_guard: BetaAsyncActionGuard, response: BetaMessage
+) -> BetaMessage:
+    for tool_call in _iter_action_guard_calls(response):
+        decision = action_guard(tool_call)
+        if inspect.isawaitable(decision):
+            decision = await decision
+
+        if normalize_guard_decision(decision) == BetaGuardDecision.BLOCK:
+            raise AnthropicError(f"Tool '{tool_call.name}' was blocked by the action guard")
+
+    return response
 
 
 def _warn_output_format_deprecated(output_format: object) -> None:

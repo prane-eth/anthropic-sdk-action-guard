@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-from anthropic import Anthropic
-from anthropic.types import ToolParam, MessageParam
+from anthropic import Anthropic, BetaToolCall, BetaGuardDecision
+from anthropic.types.beta import BetaMessageParam, BetaToolUnionParam
 
 client = Anthropic()
 
-user_message: MessageParam = {
+
+def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+    if tool_call.name == "get_weather" and tool_call.input.get("location") == "/etc":
+        return BetaGuardDecision.BLOCK
+    return BetaGuardDecision.ALLOW
+
+
+user_message: BetaMessageParam = {
     "role": "user",
     "content": "What is the weather in SF?",
 }
-tools: list[ToolParam] = [
+tools: list[BetaToolUnionParam] = [
     {
         "name": "get_weather",
         "description": "Get the weather for a specific location",
@@ -20,18 +27,19 @@ tools: list[ToolParam] = [
     }
 ]
 
-message = client.messages.create(
+message = client.beta.messages.create(
     model="claude-sonnet-4-5-20250929",
     max_tokens=1024,
     messages=[user_message],
     tools=tools,
+    action_guard=action_guard,
 )
 print(f"Initial response: {message.model_dump_json(indent=2)}")
 
 assert message.stop_reason == "tool_use"
 
 tool = next(c for c in message.content if c.type == "tool_use")
-response = client.messages.create(
+response = client.beta.messages.create(
     model="claude-sonnet-4-5-20250929",
     max_tokens=1024,
     messages=[
@@ -49,5 +57,6 @@ response = client.messages.create(
         },
     ],
     tools=tools,
+    action_guard=action_guard,
 )
 print(f"\nFinal response: {response.model_dump_json(indent=2)}")

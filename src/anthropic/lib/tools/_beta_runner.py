@@ -16,6 +16,7 @@ from typing import (
     Coroutine,
     AsyncIterator,
 )
+from inspect import isawaitable
 from contextlib import contextmanager, asynccontextmanager
 from typing_extensions import TypedDict, override
 
@@ -24,6 +25,13 @@ import httpx
 from ..._types import Body, Query, Headers, NotGiven
 from ..._utils import consume_sync_iterator, consume_async_iterator
 from ...types.beta import BetaMessage, BetaMessageParam
+from ._action_guard import (
+    BetaToolCall,
+    BetaActionGuard,
+    BetaGuardDecision,
+    BetaAsyncActionGuard,
+    normalize_guard_decision,
+)
 from ._beta_functions import (
     ToolError,
     BetaFunctionTool,
@@ -69,10 +77,12 @@ class BaseToolRunner(Generic[AnyFunctionToolT, ResponseFormatT]):
         params: ParseMessageCreateParamsBase[ResponseFormatT],
         options: RequestOptions,
         tools: Iterable[AnyFunctionToolT],
+        action_guard: BetaActionGuard | BetaAsyncActionGuard | None = None,
         max_iterations: int | None = None,
         compaction_control: CompactionControl | None = None,
     ) -> None:
         self._tools_by_name = {tool.name: tool for tool in tools}
+        self._action_guard = action_guard
         self._params: ParseMessageCreateParamsBase[ResponseFormatT] = {
             **params,
             "messages": [message for message in params["messages"]],
@@ -90,6 +100,14 @@ class BaseToolRunner(Generic[AnyFunctionToolT, ResponseFormatT]):
         self._max_iterations = max_iterations
         self._iteration_count = 0
         self._compaction_control = compaction_control
+
+    def _blocked_tool_result(self, tool_call: BetaToolCall) -> BetaToolResultBlockParam:
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_call.id,
+            "content": f"Error: Tool '{tool_call.name}' was blocked by the action guard",
+            "is_error": True,
+        }
 
     def set_messages_params(
         self,
@@ -134,6 +152,7 @@ class BaseSyncToolRunner(BaseToolRunner[BetaRunnableTool, ResponseFormatT], Gene
         options: RequestOptions,
         tools: Iterable[BetaRunnableTool],
         client: Anthropic,
+        action_guard: BetaActionGuard | None = None,
         max_iterations: int | None = None,
         compaction_control: CompactionControl | None = None,
     ) -> None:
@@ -141,6 +160,7 @@ class BaseSyncToolRunner(BaseToolRunner[BetaRunnableTool, ResponseFormatT], Gene
             params=params,
             options=options,
             tools=tools,
+            action_guard=action_guard,
             max_iterations=max_iterations,
             compaction_control=compaction_control,
         )
@@ -150,6 +170,16 @@ class BaseSyncToolRunner(BaseToolRunner[BetaRunnableTool, ResponseFormatT], Gene
         self._last_message: (
             Callable[[], ParsedBetaMessage[ResponseFormatT]] | ParsedBetaMessage[ResponseFormatT] | None
         ) = None
+
+    def _should_run_tool(self, tool_call: BetaToolCall) -> bool:
+        if self._action_guard is None:
+            return True
+
+        decision = self._action_guard(tool_call)
+        if isawaitable(decision):
+            raise TypeError("`action_guard` must be synchronous when used with the sync tool runner")
+
+        return normalize_guard_decision(decision) == BetaGuardDecision.ALLOW
 
     def __next__(self) -> RunnerItemT:
         return self._iterator.__next__()
@@ -306,6 +336,11 @@ class BaseSyncToolRunner(BaseToolRunner[BetaRunnableTool, ResponseFormatT], Gene
         results: list[BetaToolResultBlockParam] = []
 
         for tool_use in tool_use_blocks:
+            tool_call = BetaToolCall.from_tool_use_block(tool_use)
+            if not self._should_run_tool(tool_call):
+                results.append(self._blocked_tool_result(tool_call))
+                continue
+
             tool = self._tools_by_name.get(tool_use.name)
             if tool is None:
                 warnings.warn(
@@ -392,6 +427,7 @@ class BaseAsyncToolRunner(
         options: RequestOptions,
         tools: Iterable[BetaAsyncRunnableTool],
         client: AsyncAnthropic,
+        action_guard: BetaAsyncActionGuard | None = None,
         max_iterations: int | None = None,
         compaction_control: CompactionControl | None = None,
     ) -> None:
@@ -399,6 +435,7 @@ class BaseAsyncToolRunner(
             params=params,
             options=options,
             tools=tools,
+            action_guard=action_guard,
             max_iterations=max_iterations,
             compaction_control=compaction_control,
         )
@@ -410,6 +447,16 @@ class BaseAsyncToolRunner(
             | ParsedBetaMessage[ResponseFormatT]
             | None
         ) = None
+
+    async def _should_run_tool(self, tool_call: BetaToolCall) -> bool:
+        if self._action_guard is None:
+            return True
+
+        decision = self._action_guard(tool_call)
+        if isawaitable(decision):
+            decision = await decision
+
+        return normalize_guard_decision(decision) == BetaGuardDecision.ALLOW
 
     async def __anext__(self) -> RunnerItemT:
         return await self._iterator.__anext__()
@@ -579,6 +626,11 @@ class BaseAsyncToolRunner(
         results: list[BetaToolResultBlockParam] = []
 
         for tool_use in tool_use_blocks:
+            tool_call = BetaToolCall.from_tool_use_block(tool_use)
+            if not await self._should_run_tool(tool_call):
+                results.append(self._blocked_tool_result(tool_call))
+                continue
+
             tool = self._tools_by_name.get(tool_use.name)
             if tool is None:
                 warnings.warn(

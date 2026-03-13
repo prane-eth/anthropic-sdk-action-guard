@@ -10,7 +10,7 @@ import httpx
 import pytest
 from respx import MockRouter
 
-from anthropic import Anthropic, AsyncAnthropic
+from anthropic import Anthropic, BetaToolCall, AnthropicError, AsyncAnthropic, BetaGuardDecision
 from anthropic._compat import PYDANTIC_V1
 from anthropic.types.beta.beta_message import BetaMessage
 from anthropic.lib.streaming._beta_types import ParsedBetaMessageStreamEvent
@@ -228,6 +228,31 @@ class TestSyncMessages:
             assert_tool_use_response([event for event in stream], stream.get_final_message())
 
     @pytest.mark.respx(base_url=base_url)
+    def test_tool_use_action_guard_blocks(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx.Response(200, content=get_response("tool_use_response.txt"))
+        )
+
+        def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+            if tool_call.name == "get_weather":
+                return BetaGuardDecision.BLOCK
+            return BetaGuardDecision.ALLOW
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Say hello there!",
+                }
+            ],
+            model="claude-sonnet-4-20250514",
+            action_guard=action_guard,
+        ) as stream:
+            with pytest.raises(AnthropicError, match="blocked by the action guard"):
+                list(stream)
+
+    @pytest.mark.respx(base_url=base_url)
     def test_context_manager(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
             return_value=httpx.Response(200, content=get_response("basic_response.txt"))
@@ -346,6 +371,32 @@ class TestAsyncMessages:
             assert isinstance(cast(Any, stream), BetaAsyncMessageStream)
 
             assert_tool_use_response([event async for event in stream], await stream.get_final_message())
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_tool_use_action_guard_blocks(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx.Response(200, content=to_async_iter(get_response("tool_use_response.txt")))
+        )
+
+        async def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+            if tool_call.name == "get_weather":
+                return BetaGuardDecision.BLOCK
+            return BetaGuardDecision.ALLOW
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Say hello there!",
+                }
+            ],
+            model="claude-sonnet-4-20250514",
+            action_guard=action_guard,
+        ) as stream:
+            with pytest.raises(AnthropicError, match="blocked by the action guard"):
+                [event async for event in stream]
 
     @pytest.mark.asyncio
     @pytest.mark.respx(base_url=base_url)

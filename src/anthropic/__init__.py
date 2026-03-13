@@ -92,13 +92,15 @@ __all__ = [
     "AI_PROMPT",
     "beta_tool",
     "beta_async_tool",
+    "BetaGuardDecision",
+    "BetaToolCall",
     "transform_schema",
 ]
 
 if not _t.TYPE_CHECKING:
     from ._utils._resources_proxy import resources as resources
 
-from .lib.tools import beta_tool, beta_async_tool
+from .lib.tools import BetaToolCall, BetaGuardDecision, beta_tool, beta_async_tool
 from .lib.vertex import *
 from .lib.bedrock import *
 from .lib.foundry import AnthropicFoundry as AnthropicFoundry, AsyncAnthropicFoundry as AsyncAnthropicFoundry

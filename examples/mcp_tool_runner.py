@@ -13,10 +13,16 @@ import rich
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, BetaGuardDecision
 from anthropic.lib.tools.mcp import async_mcp_tool
 
 client = AsyncAnthropic()
+
+
+def action_guard(tool_call) -> BetaGuardDecision:
+    if tool_call.name == "delete_file":
+        return BetaGuardDecision.BLOCK
+    return BetaGuardDecision.ALLOW
 
 
 async def main() -> None:
@@ -46,6 +52,7 @@ async def main() -> None:
                 max_tokens=1024,
                 tools=tools,
                 messages=[{"role": "user", "content": "List the files in /tmp"}],
+                action_guard=action_guard,
             )
             async for message in runner:
                 rich.print(message)

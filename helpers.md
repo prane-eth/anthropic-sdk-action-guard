@@ -149,13 +149,21 @@ This SDK provides helpers for integrating with [Model Context Protocol (MCP)](ht
 
 ### Using MCP tools with tool_runner
 
+`tool_runner()` also accepts an `action_guard` callback for centralized validation before each local tool execution. This applies to normal function tools and MCP tools wrapped with `mcp_tool()` or `async_mcp_tool()`.
+
 ```py
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, BetaGuardDecision
 from anthropic.lib.tools.mcp import async_mcp_tool
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
 
 client = AsyncAnthropic()
+
+
+def action_guard(tool_call):
+    if tool_call.name == "delete_file":
+        return BetaGuardDecision.BLOCK
+    return BetaGuardDecision.ALLOW
 
 async with stdio_client(StdioServerParameters(command="mcp-server")) as (read, write):
     async with ClientSession(read, write) as mcp_client:
@@ -167,10 +175,52 @@ async with stdio_client(StdioServerParameters(command="mcp-server")) as (read, w
             max_tokens=1024,
             messages=[{"role": "user", "content": "Use the available tools"}],
             tools=[async_mcp_tool(t, mcp_client) for t in tools_result.tools],
+            action_guard=action_guard,
         )
         async for message in runner:
             print(message)
 ```
+
+### Using action_guard with create
+
+`beta.messages.create()` accepts the same `action_guard` callback. For `create()`, guard checks run on the returned non-streaming message content. If a `tool_use`/`mcp_tool_use` block is present and the guard returns `BLOCK`, the SDK raises an `AnthropicError`.
+
+```py
+from anthropic import Anthropic, AnthropicError, BetaGuardDecision, BetaToolCall
+
+client = Anthropic()
+
+
+def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+    if tool_call.name == "delete_file":
+        return BetaGuardDecision.BLOCK
+    return BetaGuardDecision.ALLOW
+
+
+try:
+    client.beta.messages.create(
+        model="claude-sonnet-4-5-20250929",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "Use your tools"}],
+        tools=[
+            {
+                "name": "delete_file",
+                "description": "Deletes a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            }
+        ],
+        action_guard=action_guard,
+    )
+except AnthropicError as exc:
+    print(f"Blocked: {exc}")
+```
+
+> [!NOTE]
+> `action_guard` does not intercept remote `mcp_servers` executions or built-in server-side tools because those execute before the SDK receives the final response. For `create(stream=True)`, the guard is not applied during event streaming.
 
 > [!TIP]
 > If you're using the sync client, replace `async_mcp_tool` with `mcp_tool`.

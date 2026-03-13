@@ -4,11 +4,17 @@ from typing_extensions import Literal
 
 import rich
 
-from anthropic import Anthropic, beta_tool
+from anthropic import Anthropic, BetaToolCall, BetaGuardDecision, beta_tool
 from anthropic.lib.tools import BetaFunctionTool, BetaFunctionToolResultType
 from anthropic.types.beta import BetaToolReferenceBlockParam
 
 client = Anthropic()
+
+
+def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+    if tool_call.name == "get_weather" and tool_call.input.get("location") == "/etc":
+        return BetaGuardDecision.BLOCK
+    return BetaGuardDecision.ALLOW
 
 
 @beta_tool(defer_loading=True)
@@ -71,6 +77,7 @@ def main() -> None:
         model="claude-sonnet-4-5-20250929",
         tools=[*tools, make_tool_searcher(tools)],
         messages=[{"role": "user", "content": "What is the weather in SF?"}],
+        action_guard=action_guard,
         betas=["tool-search-tool-2025-10-19"],
     )
     for message in runner:

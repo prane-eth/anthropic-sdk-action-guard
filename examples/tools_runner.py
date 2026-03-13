@@ -3,9 +3,15 @@ from typing_extensions import Literal
 
 import rich
 
-from anthropic import Anthropic, beta_tool
+from anthropic import Anthropic, BetaToolCall, BetaGuardDecision, beta_tool
 
 client = Anthropic()
+
+
+def action_guard(tool_call: BetaToolCall) -> BetaGuardDecision:
+    if tool_call.name == "get_weather" and tool_call.input.get("location") == "/etc":
+        return BetaGuardDecision.BLOCK
+    return BetaGuardDecision.ALLOW
 
 
 @beta_tool
@@ -48,6 +54,7 @@ def main() -> None:
         # alternatively, you can use `tools=[anthropic.beta_tool(get_weather)]`
         tools=[get_weather],
         messages=[{"role": "user", "content": "What is the weather in SF?"}],
+        action_guard=action_guard,
     )
     for message in runner:
         rich.print(message)

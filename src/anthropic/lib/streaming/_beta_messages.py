@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import builtins
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Type, Generic, Callable, cast
@@ -28,8 +29,16 @@ from ._beta_types import (
 )
 from ..._streaming import Stream, AsyncStream
 from ...types.beta import BetaRawMessageStreamEvent
+from ..._exceptions import AnthropicError
 from ..._utils._utils import is_given
 from .._parse._response import ResponseFormatT, parse_text
+from ..tools._action_guard import (
+    BetaToolCall,
+    BetaActionGuard,
+    BetaGuardDecision,
+    BetaAsyncActionGuard,
+    normalize_guard_decision,
+)
 from ...types.beta.parsed_beta_message import ParsedBetaMessage, ParsedBetaContentBlock
 
 
@@ -48,12 +57,14 @@ class BetaMessageStream(Generic[ResponseFormatT]):
         self,
         raw_stream: Stream[BetaRawMessageStreamEvent],
         output_format: ResponseFormatT | NotGiven,
+        action_guard: BetaActionGuard | None = None,
     ) -> None:
         self._raw_stream = raw_stream
         self.text_stream = self.__stream_text__()
         self._iterator = self.__stream__()
         self.__final_message_snapshot: ParsedBetaMessage[ResponseFormatT] | None = None
         self.__output_format = output_format
+        self.__action_guard = action_guard
 
     @property
     def response(self) -> httpx.Response:
@@ -137,9 +148,25 @@ class BetaMessageStream(Generic[ResponseFormatT]):
                 output_format=self.__output_format,
             )
 
+            if sse_event.type == "content_block_stop":
+                content_block = self.current_message_snapshot.content[sse_event.index]
+                if content_block.type == "tool_use" or content_block.type == "mcp_tool_use":
+                    self._validate_action_guard(BetaToolCall.from_tool_use_block(content_block))
+
             events_to_fire = build_events(event=sse_event, message_snapshot=self.current_message_snapshot)
             for event in events_to_fire:
                 yield event
+
+    def _validate_action_guard(self, tool_call: BetaToolCall) -> None:
+        if self.__action_guard is None:
+            return
+
+        decision = self.__action_guard(tool_call)
+        if inspect.isawaitable(decision):
+            raise TypeError("`action_guard` must be synchronous when used with the sync stream method")
+
+        if normalize_guard_decision(decision) == BetaGuardDecision.BLOCK:
+            raise AnthropicError(f"Tool '{tool_call.name}' was blocked by the action guard")
 
     def __stream_text__(self) -> Iterator[str]:
         for chunk in self:
@@ -162,14 +189,20 @@ class BetaMessageStreamManager(Generic[ResponseFormatT]):
         api_request: Callable[[], Stream[BetaRawMessageStreamEvent]],
         *,
         output_format: ResponseFormatT | NotGiven,
+        action_guard: BetaActionGuard | None = None,
     ) -> None:
         self.__stream: BetaMessageStream[ResponseFormatT] | None = None
         self.__api_request = api_request
         self.__output_format = output_format
+        self.__action_guard = action_guard
 
     def __enter__(self) -> BetaMessageStream[ResponseFormatT]:
         raw_stream = self.__api_request()
-        self.__stream = BetaMessageStream(raw_stream, output_format=self.__output_format)
+        self.__stream = BetaMessageStream(
+            raw_stream,
+            output_format=self.__output_format,
+            action_guard=self.__action_guard,
+        )
         return self.__stream
 
     def __exit__(
@@ -197,12 +230,14 @@ class BetaAsyncMessageStream(Generic[ResponseFormatT]):
         self,
         raw_stream: AsyncStream[BetaRawMessageStreamEvent],
         output_format: ResponseFormatT | NotGiven,
+        action_guard: BetaAsyncActionGuard | None = None,
     ) -> None:
         self._raw_stream = raw_stream
         self.text_stream = self.__stream_text__()
         self._iterator = self.__stream__()
         self.__final_message_snapshot: ParsedBetaMessage[ResponseFormatT] | None = None
         self.__output_format = output_format
+        self.__action_guard = action_guard
 
     @property
     def response(self) -> httpx.Response:
@@ -286,9 +321,25 @@ class BetaAsyncMessageStream(Generic[ResponseFormatT]):
                 output_format=self.__output_format,
             )
 
+            if sse_event.type == "content_block_stop":
+                content_block = self.current_message_snapshot.content[sse_event.index]
+                if content_block.type == "tool_use" or content_block.type == "mcp_tool_use":
+                    await self._validate_action_guard(BetaToolCall.from_tool_use_block(content_block))
+
             events_to_fire = build_events(event=sse_event, message_snapshot=self.current_message_snapshot)
             for event in events_to_fire:
                 yield event
+
+    async def _validate_action_guard(self, tool_call: BetaToolCall) -> None:
+        if self.__action_guard is None:
+            return
+
+        decision = self.__action_guard(tool_call)
+        if inspect.isawaitable(decision):
+            decision = await decision
+
+        if normalize_guard_decision(decision) == BetaGuardDecision.BLOCK:
+            raise AnthropicError(f"Tool '{tool_call.name}' was blocked by the action guard")
 
     async def __stream_text__(self) -> AsyncIterator[str]:
         async for chunk in self:
@@ -313,14 +364,20 @@ class BetaAsyncMessageStreamManager(Generic[ResponseFormatT]):
         api_request: Awaitable[AsyncStream[BetaRawMessageStreamEvent]],
         *,
         output_format: ResponseFormatT | NotGiven = NOT_GIVEN,
+        action_guard: BetaAsyncActionGuard | None = None,
     ) -> None:
         self.__stream: BetaAsyncMessageStream[ResponseFormatT] | None = None
         self.__api_request = api_request
         self.__output_format = output_format
+        self.__action_guard = action_guard
 
     async def __aenter__(self) -> BetaAsyncMessageStream[ResponseFormatT]:
         raw_stream = await self.__api_request
-        self.__stream = BetaAsyncMessageStream(raw_stream, output_format=self.__output_format)
+        self.__stream = BetaAsyncMessageStream(
+            raw_stream,
+            output_format=self.__output_format,
+            action_guard=self.__action_guard,
+        )
         return self.__stream
 
     async def __aexit__(
